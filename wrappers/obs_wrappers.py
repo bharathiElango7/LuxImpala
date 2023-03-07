@@ -5,7 +5,6 @@ import numpy as np
 import numpy.typing as npt
 from gym import spaces
 
-
 class SimpleUnitObservationWrapper(gym.ObservationWrapper):
     """
     A simple state based observation to work with in pair with the SimpleUnitDiscreteController
@@ -22,7 +21,8 @@ class SimpleUnitObservationWrapper(gym.ObservationWrapper):
 
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
-        self.observation_space = spaces.Box(-999, 999, shape=(13,))
+        #self.observation_space = spaces.Box(-999, 999, shape=(13,))
+
 
     def observation(self, obs):
         return SimpleUnitObservationWrapper.convert_obs(obs, self.env.state.env_cfg)

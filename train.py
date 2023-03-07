@@ -2,10 +2,11 @@
 Implementation of RL agent. Note that luxai_s2 and stable_baselines3 are packages not available during the competition running (ATM)
 """
 
-
+from deepdiff import DeepDiff
 import copy
 import os.path as osp
-
+import random
+import json
 import gym
 import numpy as np
 import torch as th
@@ -14,10 +15,9 @@ from gym import spaces
 from gym.wrappers import TimeLimit
 from luxai_s2.state import ObservationStateDict, StatsStateDict
 from luxai_s2.utils.heuristics.factory_placement import place_near_random_ice
-from luxai_s2.wrappers import SB3Wrapper
 
 
-from wrappers import SimpleUnitDiscreteController, SimpleUnitObservationWrapper
+from wrappers import SimpleUnitDiscreteController, SimpleUnitObservationWrapper,SB3Wrapper
 
 
 class CustomEnvWrapper(gym.Wrapper):
@@ -77,59 +77,15 @@ class CustomEnvWrapper(gym.Wrapper):
         return obs, reward, done, info
 
     def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)["player_0"]
+        obs = self.env.reset(**kwargs)
         self.prev_step_metrics = None
         return obs
 
 
-def parse_args():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Simple script that simplifies Lux AI Season 2 as a single-agent environment with a reduced observation and action space. It trains a policy that can succesfully control a heavy unit to dig ice and transfer it back to a factory to keep it alive"
-    )
-    parser.add_argument("-s", "--seed", type=int, default=12, help="seed for training")
-    parser.add_argument(
-        "-n",
-        "--n-envs",
-        type=int,
-        default=8,
-        help="Number of parallel envs to run. Note that the rollout size is configured separately and invariant to this value",
-    )
-    parser.add_argument(
-        "--max-episode-steps",
-        type=int,
-        default=200,
-        help="Max steps per episode before truncating them",
-    )
-    parser.add_argument(
-        "--total-timesteps",
-        type=int,
-        default=3_000_000,
-        help="Total timesteps for training",
-    )
-
-    parser.add_argument(
-        "--eval",
-        action="store_true",
-        help="If set, will only evaluate a given policy. Otherwise enters training mode",
-    )
-    parser.add_argument(
-        "--model-path", type=str, help="Path to SB3 model weights to use for evaluation"
-    )
-    parser.add_argument(
-        "-l",
-        "--log-path",
-        type=str,
-        default="logs",
-        help="Logging path",
-    )
-    args = parser.parse_args()
-    return args
 
 
-def make_env(env_id: str, rank: int, seed: int = 0, max_episode_steps=1000):
-    def _init() -> gym.Env:
+def make_env(env_id: str, rank: int, seed: int = 0, max_episode_steps=100):
+
         # verbose = 0
         # collect stats so we can create reward functions
         # max factories set to 2 for simplification and keeping returns consistent as we survive longer if there are more initial resources
@@ -144,57 +100,64 @@ def make_env(env_id: str, rank: int, seed: int = 0, max_episode_steps=1000):
             factory_placement_policy=place_near_random_ice,
             controller=SimpleUnitDiscreteController(env.env_cfg),
         )
-        env = SimpleUnitObservationWrapper(
-            env
-        )  # changes observation to include a few simple features
-        env = CustomEnvWrapper(env)  # convert to single agent, add our reward
+        #env = SimpleUnitObservationWrapper(env)  # changes observation to include a few simple features
+        #env = CustomEnvWrapper(env)  # convert to single agent, add our reward
         env = TimeLimit(
             env, max_episode_steps=max_episode_steps
         )  # set horizon to 100 to make training faster. Default is 1000
-        env = Monitor(env)  # for SB3 to allow it to record metrics
-        env.reset(seed=seed + rank)
-        set_random_seed(seed)
+
         return env
 
-    return _init
 
 
 
-
-
-def main(args):
-    print("Training with args", args)
-    if args.seed is not None:
-        set_random_seed(args.seed)
-    env_id = "LuxAI_S2-v0"
-    env = SubprocVecEnv(
-        [
-            make_env(env_id, i, max_episode_steps=args.max_episode_steps)
-            for i in range(args.n_envs)
-        ]
-    )
-    env.reset()
-    rollout_steps = 4000
-    policy_kwargs = dict(net_arch=(128, 128))
-    model = PPO(
-        "MlpPolicy",
-        env,
-        n_steps=rollout_steps // args.n_envs,
-        batch_size=800,
-        learning_rate=3e-4,
-        policy_kwargs=policy_kwargs,
-        verbose=1,
-        n_epochs=2,
-        target_kl=0.05,
-        gamma=0.99,
-        tensorboard_log=osp.join(args.log_path),
-    )
-    if args.eval:
-        evaluate(args, env_id, model)
+def convert_ndarrays_to_lists(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_ndarrays_to_lists(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_ndarrays_to_lists(x) for x in obj]
     else:
-        train(args, env_id, model)
+        return obj
 
 
-if __name__ == "__main__":
-    # python ../examples/sb3.py -l logs/exp_1 -s 42 -n 1
-    main(parse_args())
+def train():
+    env_id = "LuxAI_S2-v0"
+    env = gym.make(env_id, verbose=0, collect_stats=True, MAX_FACTORIES=2)
+    initialstate = env.reset()
+
+    env = SB3Wrapper(
+            env,
+            factory_placement_policy=place_near_random_ice,
+            controller=SimpleUnitDiscreteController(env.env_cfg),
+        )
+    env = TimeLimit(
+        env, max_episode_steps=100
+    )  #
+    agent = "player_0"
+    opponent = "player_1"
+    lux_action ={}
+    lux_action2 = {}
+    nextState = env.reset()
+    shared_obs = nextState["player_0"]
+    factories = shared_obs["factories"][agent]
+    for unit_id in factories.keys():
+        lux_action[unit_id] = 0  # build a single heavy
+    factories = shared_obs["factories"][opponent]
+    for unit_id in factories.keys():
+        lux_action2[unit_id] = 1 # build a single light
+    actions = {agent: lux_action, opponent: lux_action2}
+    CreatedUnitState,rewards,done,info = env.step(actions)
+
+    my_dict = convert_ndarrays_to_lists(CreatedUnitState)
+    # print("writing to file")
+    with open('RobotCreatedEnvObsdata.json', 'w') as f:
+        json.dump(my_dict, f)
+
+
+train()
+
+
+
+

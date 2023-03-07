@@ -27,6 +27,10 @@ class Controller:
         raise NotImplementedError()
 
 
+
+DIRECTIONS = ["CENTER","UP","RIGHT","DOWN","LEFT"]
+RESOURCES = ["ICE","ORE","WATER","METAL","POWER"]
+
 class SimpleUnitDiscreteController(Controller):
     def __init__(self, env_cfg) -> None:
         """
@@ -52,6 +56,7 @@ class SimpleUnitDiscreteController(Controller):
         see how the lux action space is defined in luxai_s2/spaces/action.py
 
         """
+        self.Mapsize = 48
         self.env_cfg = env_cfg
         self.move_act_dims = 4
         self.transfer_act_dims = 5
@@ -67,34 +72,52 @@ class SimpleUnitDiscreteController(Controller):
 
         self.total_act_dims = self.no_op_dim_high
         action_space = spaces.Discrete(self.total_act_dims)
+
         super().__init__(action_space)
+    def get_action_space(self,MapSize:int):
+        x = MapSize
+        y = MapSize
+        P=2
+        # Transfer all resources in cargo -  to make it discrete - otherwise too many actions
+        # Pickup upto cargo capacity - to make it discrete - otherwise too many actions
+        RobotActions =[]
+        for movingaction in DIRECTIONS:
+            RobotActions.append("Move"+movingaction)
+        for transferaction in DIRECTIONS:
+            for resource in RESOURCES:
+                RobotActions.append("Transfer"+resource+transferaction)
+        #for pickupaction in RESOURCES:
+            #RobotActions.append("Pickup"+pickupaction)
+        #pickup only power from factory
+        RobotActions.append("PickupPower")
+        RobotActions.append("Dig")
+        # Move center is NO-OP for a robot
+        TotalRobotActions = len(RobotActions)
 
-    def _is_move_action(self, id):
-        return id < self.move_dim_high
+        FactoryActions = ["BuildLightRobot","BuildHeavyRobot","WaterForLichen","NO-OP"]
+        TotalFactoryActions = len(FactoryActions)
+        action_space = spaces.Dict({
+            "Robot": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + TotalRobotActions),
+            "Factory": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + TotalFactoryActions)
 
-    def _get_move_action(self, id):
+        })
+
+
+    def get_move_action(self, direction):
         # move direction is id + 1 since we don't allow move center here
-        return np.array([0, id + 1, 0, 0, 0, 1])
+        return np.array([0, direction, 0, 0, 0, 9999])
 
-    def _is_transfer_action(self, id):
-        return id < self.transfer_dim_high
+    def get_transfer_action(self, resource, direction, amount):
+        return np.array([1, direction, resource, amount, 0, 1])
 
-    def _get_transfer_action(self, id):
-        id = id - self.move_dim_high
-        transfer_dir = id % 5
-        return np.array([1, transfer_dir, 0, self.env_cfg.max_transfer_amount, 0, 1])
-
-    def _is_pickup_action(self, id):
-        return id < self.pickup_dim_high
-
-    def _get_pickup_action(self, id):
-        return np.array([2, 0, 4, self.env_cfg.max_transfer_amount, 0, 1])
-
-    def _is_dig_action(self, id):
-        return id < self.dig_dim_high
+    def get_pickup_action(self, amount):
+        # max battery capacity is 3000 for heavy robot, so pick up max amount of power
+        # 4 means power
+        return np.array([2, 0, 4, 3000, 0, 1])
 
     def _get_dig_action(self, id):
-        return np.array([3, 0, 0, 0, 0, 1])
+        # keep diggin until cargo is full
+        return np.array([3, 0, 0, 0, 0, 9999])
 
     def action_to_lux_action(
         self, agent: str, obs: Dict[str, Any], action: npt.NDArray
