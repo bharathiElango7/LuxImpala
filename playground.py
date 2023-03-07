@@ -303,3 +303,5 @@ for key, spec in get_observation_spec2(3).spaces.items():
         raise NotImplementedError(f"{type(spec)} is not an accepted observation space.")
 
 print(tempobs)
+
+# have to test env
