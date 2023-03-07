@@ -4,7 +4,7 @@ from typing import Any, Dict
 import numpy as np
 import numpy.typing as npt
 from gym import spaces
-
+from lux.config import EnvConfig
 
 # Controller class copied here since you won't have access to the luxai_s2 package directly on the competition server
 class Controller:
@@ -59,7 +59,8 @@ class SimpleUnitDiscreteController(Controller):
         self.Mapsize = 48
         self.env_cfg = env_cfg
         self.move_act_dims = 4
-        self.transfer_act_dims = 5
+        # 5 transfer directions * 5 resources
+        self.transfer_act_dims = 25
         self.pickup_act_dims = 1
         self.dig_act_dims = 1
         self.no_op_dims = 1
@@ -92,6 +93,7 @@ class SimpleUnitDiscreteController(Controller):
         RobotActions.append("PickupPower")
         RobotActions.append("Dig")
         # Move center is NO-OP for a robot
+
         TotalRobotActions = len(RobotActions)
 
         FactoryActions = ["BuildLightRobot","BuildHeavyRobot","WaterForLichen","NO-OP"]
@@ -102,26 +104,98 @@ class SimpleUnitDiscreteController(Controller):
 
         })
 
-
-    def get_move_action(self, direction):
+    def is_move_action(self, id):
+        return id < self.move_dim_high
+    def get_move_action(self, id):
         # move direction is id + 1 since we don't allow move center here
-        return np.array([0, direction, 0, 0, 0, 9999])
+        return np.array([0, id+1, 0, 0, 0, 9999])
 
-    def get_transfer_action(self, resource, direction, amount):
-        return np.array([1, direction, resource, amount, 0, 1])
+    def is_transfer_action(self, id):
+        return id < self.transfer_dim_high
+    def get_transfer_action(self, direction,resource, amount):
+        return np.array([1, direction, resource, amount, 0, 9999])
+
+    def is_pickup_action(self, id):
+        return id < self.pickup_dim_high
+
+    def is_dig_action(self, id):
+        return id < self.dig_dim_high
 
     def get_pickup_action(self, amount):
         # max battery capacity is 3000 for heavy robot, so pick up max amount of power
         # 4 means power
-        return np.array([2, 0, 4, 3000, 0, 1])
+        return np.array([2, 0, 4, 3000, 0, 9999])
 
-    def _get_dig_action(self, id):
+    def get_dig_action(self, id):
         # keep diggin until cargo is full
         return np.array([3, 0, 0, 0, 0, 9999])
 
+    def process_action(self,obs,actionTensor:Dict[str, np.ndArray]):
+        shared_obs = obs["player_0"]
+        Agents = ["player_0", "player_1"]
+        env_cfg = EnvConfig
+        FinalAction = {}
+        for agent in Agents:
+            lux_action = dict()
+            if agent == "player_0":
+                P = 0
+            else:
+                P = 1
+
+            units = shared_obs["units"][agent]
+            for unit_id in units.keys():
+                unit = units[unit_id]
+                cargo_space = env_cfg.ROBOTS[unit["unit_type"]].CARGO_SPACE
+                battery_cap = env_cfg.ROBOTS[unit["unit_type"]].BATTERY_CAPACITY
+                x,y = unit["pos"]
+                choice = actionTensor["Robot"][0][P][x][y]
+                action_queue = []
+                no_op = False
+                if self.is_move_action(choice):
+                    action_queue = [self.get_move_action(choice)]
+                elif self.is_transfer_action(choice):
+                    id = choice
+                    id = id - self.move_dim_high
+                    direction = id % 5
+                    resource = int(id / 5)
+                    amount = unit["cargo"][resource]
+                    action_queue = [self.get_transfer_action(direction,resource,amount)]
+                elif self.is_pickup_action(choice):
+                    chargeleft = battery_cap - unit["power"]
+                    action_queue = [self.get_pickup_action(chargeleft)]
+                elif self.is_dig_action(choice):
+                    action_queue = [self.get_dig_action(choice)]
+                else:
+                    # action is a no_op, so we don't update the action queue
+                    no_op = True
+
+                # simple trick to help agents conserve power is to avoid updating the action queue
+                # if the agent was previously trying to do that particular action already
+                if len(unit["action_queue"]) > 0 and len(action_queue) > 0:
+                    same_actions = (unit["action_queue"][0] == action_queue[0]).all()
+                    if same_actions:
+                        no_op = True
+                if not no_op:
+                    lux_action[unit_id] = action_queue
+
+            factories = shared_obs["factories"][agent]
+            for unit_id in factories.keys():
+                factory = factories[unit_id]
+                x, y = factory["pos"]
+                choice = actionTensor["Factory"][0][P][x][y]
+                lux_action[unit_id] = choice
+
+            FinalAction[agent] = lux_action
+
+        return FinalAction
+
+
+
+
+
+
     def action_to_lux_action(
-        self, agent: str, obs: Dict[str, Any], action: npt.NDArray
-    ):
+        self, agent: str, obs: Dict[str, Any], action: npt.NDArray ):
         shared_obs = obs["player_0"]
         lux_action = dict()
         units = shared_obs["units"][agent]
