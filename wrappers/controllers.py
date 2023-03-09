@@ -101,8 +101,8 @@ class SimpleUnitDiscreteController(Controller):
         # Pickup upto cargo capacity - to make it discrete - otherwise too many actions
 
         action_space = spaces.Dict({
-            "LightRobot": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + self.TotalRobotActions),
-            "HeavyRobot": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + self.TotalRobotActions),
+            "Robot": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + self.TotalRobotActions),
+            #"HeavyRobot": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + self.TotalRobotActions),
             "Factory": spaces.MultiDiscrete(np.zeros((1, P, x, y), dtype=int) + self.TotalFactoryActions)
 
         })
@@ -153,14 +153,16 @@ class SimpleUnitDiscreteController(Controller):
             units = shared_obs["units"][agent]
             for unit_id in units.keys():
                 unit = units[unit_id]
+                """
                 if unit["unit_type"] == "LIGHT":
                     unitType = "LightRobot"
                 else:
                     unitType = "HeavyRobot"
+                """
                 cargo_space = env_cfg.ROBOTS[unit["unit_type"]].CARGO_SPACE
                 battery_cap = env_cfg.ROBOTS[unit["unit_type"]].BATTERY_CAPACITY
                 x,y = unit["pos"]
-                choice = actionTensor[unitType][0][P][x][y]
+                choice = actionTensor["Robot"][0][P][x][y]
                 action_queue = []
                 no_op = False
                 if self.is_move_action(choice):
@@ -173,7 +175,10 @@ class SimpleUnitDiscreteController(Controller):
                     direction = id % 5
                     resource = int(id / 5)
                     # transfer all resources in cargo
-                    amount = unit["cargo"][resource]
+                    if resource == 4:
+                        amount = unit["power"]
+                    else:
+                        amount = unit["cargo"][resource]
                     action_queue = [self.get_transfer_action(direction,resource,amount)]
                 elif self.is_pickup_action(choice):
                     # pickup only power from factory
@@ -222,6 +227,55 @@ class SimpleUnitDiscreteController(Controller):
         return 1 + self.dfs(board,visited,x+1,y,strainId) + self.dfs(board,visited,x-1,y,strainId) \
             +self.dfs(board,visited,x,y+1,strainId) + self.dfs(board,visited,x,y-1,strainId)
 
+
+    def PosToUnitDict(self,obs):
+        shared_obs = obs["player_0"]
+        PlayerDict = {"player_0": {},"player_1": {}}
+        Agents = ["player_0", "player_1"]
+        for agent in Agents:
+            units = shared_obs["units"][agent]
+            for unit_id in units.keys():
+                unit = units[unit_id]
+                x,y = unit["pos"]
+                PlayerDict[agent][(x,y)]= unit_id
+
+        return PlayerDict
+
+    def PosToFactoryDict(self, obs):
+        shared_obs = obs["player_0"]
+        PlayerDict = {"player_0": {}, "player_1": {}}
+        Agents = ["player_0", "player_1"]
+        for agent in Agents:
+            factories = shared_obs["factories"][agent]
+            for unit_id in factories.keys():
+                factory = factories[unit_id]
+                x, y = factory["pos"]
+                PlayerDict[agent][(x, y)]=unit_id
+                PlayerDict[agent][(x+1, y)]=unit_id
+                PlayerDict[agent][(x, y+1)]=unit_id
+                PlayerDict[agent][(x+1, y+1)]=unit_id
+                PlayerDict[agent][(x+1, y-1)]=unit_id
+                PlayerDict[agent][(x-1, y)]=unit_id
+                PlayerDict[agent][(x-1, y-1)]=unit_id
+                PlayerDict[agent][(x-1, y+1)]=unit_id
+                PlayerDict[agent][(x, y-1)]=unit_id
+
+        return PlayerDict
+
+
+
+    def nextPosLoc(self,x,y,direction):
+        if direction == 0:
+            return (x,y-1)
+        if direction == 1:
+            return (x+1,y)
+        if direction == 2:
+            return (x,y+1)
+        if direction == 3:
+            return (x-1,y)
+
+
+
     def actionMask2(self,obs):
         actionspace = self.get_action_space(self.Mapsize)
 
@@ -233,9 +287,9 @@ class SimpleUnitDiscreteController(Controller):
         }
         shared_obs = obs["player_0"]
         Agents = ["player_0", "player_1"]
+        env_cfg = EnvConfig
 
         for agent in Agents:
-            lux_action = dict()
             if agent == "player_0":
                 P = 0
             else:
@@ -262,7 +316,137 @@ class SimpleUnitDiscreteController(Controller):
                 if water < waterRequiredForLichen:
                     available_actions_mask["Factory"][0][P][x][y][2] = False
 
+
             # robot actions
+            units = shared_obs["units"][agent]
+            for unit_id in units.keys():
+                unit = units[unit_id]
+                x,y = unit["pos"]
+
+                # lets first check the move locations
+                # not valid if outside grid
+                # not valid if next loc is an enemy factory
+                # will handle collisions later
+                FactoryDict = self.PosToFactoryDict(obs)
+                if agent == "player_0":
+                    opponentFactoryLocations = FactoryDict["player_1"]
+                else:
+                    opponentFactoryLocations = FactoryDict["player_0"]
+                for movedirection in range(self.move_dim_high):
+                    nextPosX,nextPosY = self.nextPosLoc(x,y,movedirection)
+                    if nextPosX <0 or nextPosY <0 or nextPosX >= self.Mapsize or nextPosY >= self.Mapsize:
+                        available_actions_mask["Robot"][0][P][x][y][movedirection] = False
+                    if (nextPosX,nextPosY) in opponentFactoryLocations:
+                        available_actions_mask["Robot"][0][P][x][y][movedirection] = False
+
+                    # lets check if we have enough power for rubble
+                    rubbleval = shared_obs["board"]["rubble"][nextPosX][nextPosY]
+                    if unit["unit_type"] == "LIGHT":
+                        powerRequired = math.floor(1 + (0.05 * rubbleval))
+                    else:
+                        powerRequired = math.floor(20 + (0.05 * rubbleval))
+                    if unit["power"] < powerRequired:
+                        available_actions_mask["Robot"][0][P][x][y][movedirection] = False
+
+                #TRANSFERS
+
+
+                # make all transfers valid in terms of directions - we cant be sure which robot will move to our adjacent tile,
+                # which might enable a transfer
+                # just check if resource > 0
+
+                UnitLocations = self.PosToUnitDict(obs)
+                AgentUnits = UnitLocations[agent]
+
+                for choice in range(self.move_dim_high,self.transfer_dim_high):
+                    id = choice
+                    id = id - self.move_dim_high
+                    direction = id % 5
+                    resource = int(id / 5)
+                    # transfer all resources in cargo
+                    if resource == 4:
+                        amount = unit["power"]
+                    else:
+                        amount = unit["cargo"][resource]
+                    if amount < 1:
+                        available_actions_mask["Robot"][0][P][x][y][choice] = False
+
+                    if direction !=0:
+                        # direction number 0 transfer to tile you are currently on(CENTER), not adjacent
+                        # direction -1 because my directions function returns based on 0 index
+                        nextPosX, nextPosY = self.nextPosLoc(x, y, direction-1)
+                        if nextPosX < 0 or nextPosY < 0 or nextPosX >= self.Mapsize or nextPosY >= self.Mapsize:
+                            available_actions_mask["Robot"][0][P][x][y][choice] = False
+                        if (nextPosX, nextPosY) in opponentFactoryLocations:
+                            available_actions_mask["Robot"][0][P][x][y][choice] = False
+
+                        # lets check if receiving unit has enough cargo
+                        if (nextPosX,nextPosY) in AgentUnits:
+                            adjUnitId = AgentUnits[(nextPosX,nextPosY)]
+                            adjUnit = units[adjUnitId]
+                            cargo_space = env_cfg.ROBOTS[adjUnit["unit_type"]].CARGO_SPACE
+                            battery_cap = env_cfg.ROBOTS[adjUnit["unit_type"]].BATTERY_CAPACITY
+                            if resource == 4:
+                                spaceleft = battery_cap - adjUnit["power"]
+                            else:
+                                spaceleft = cargo_space - adjUnit["cargo"][resource]
+                            if amount > spaceleft:
+                                available_actions_mask["Robot"][0][P][x][y][choice] = False
+
+
+
+
+                # pickup action
+                # we pick up only power if on top of factory or battery is not charged
+                x, y = unit["pos"]
+                battery_cap = env_cfg.ROBOTS[unit["unit_type"]].BATTERY_CAPACITY
+                OwnFactoryLocations = FactoryDict[agent]
+                if (x, y) not in OwnFactoryLocations or unit["power"] == battery_cap:
+                    available_actions_mask["Robot"][0][P][x][y][self.transfer_dim_high] = False
+
+                # DIG ACTION
+                # cant dig if on own factory location or own lichen tile
+                x, y = unit["pos"]
+                OwnFactoryLocations = FactoryDict[agent]
+                if (x,y) in OwnFactoryLocations:
+                    available_actions_mask["Robot"][0][P][x][y][self.pickup_dim_high] = False
+
+                if shared_obs["board"]["lichen_strains"][x][y] in shared_obs["teams"][agent]["factory_strains"]:
+                    available_actions_mask["Robot"][0][P][x][y][self.pickup_dim_high] = False
+
+
+                # no op action is always valid!
+        return available_actions_mask
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -270,89 +454,5 @@ class SimpleUnitDiscreteController(Controller):
 
 
 
-    def action_masks(self, agent: str, obs: Dict[str, Any]):
-        """
-        Defines a simplified action mask for this controller's action space
-
-        Doesn't account for whether robot has enough power
-        """
-
-        # compute a factory occupancy map that will be useful for checking if a board tile
-        # has a factory and which team's factory it is.
-        shared_obs = obs[agent]
-        factory_occupancy_map = (
-            np.ones_like(shared_obs["board"]["rubble"], dtype=int) * -1
-        )
-        factories = dict()
-        for player in shared_obs["factories"]:
-            factories[player] = dict()
-            for unit_id in shared_obs["factories"][player]:
-                f_data = shared_obs["factories"][player][unit_id]
-                f_pos = f_data["pos"]
-                # store in a 3x3 space around the factory position it's strain id.
-                factory_occupancy_map[
-                    f_pos[0] - 1 : f_pos[0] + 2, f_pos[1] - 1 : f_pos[1] + 2
-                ] = f_data["strain_id"]
-
-        units = shared_obs["units"][agent]
-        action_mask = np.zeros((self.total_act_dims), dtype=bool)
-        for unit_id in units.keys():
-            action_mask = np.zeros(self.total_act_dims)
-            # movement is always valid
-            action_mask[:4] = True
-
-            # transferring is valid only if the target exists
-            unit = units[unit_id]
-            pos = np.array(unit["pos"])
-            # a[1] = direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
-            move_deltas = np.array([[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]])
-            for i, move_delta in enumerate(move_deltas):
-                transfer_pos = np.array(
-                    [pos[0] + move_delta[0], pos[1] + move_delta[1]]
-                )
-                # check if theres a factory tile there
-                if (
-                    transfer_pos[0] < 0
-                    or transfer_pos[1] < 0
-                    or transfer_pos[0] >= len(factory_occupancy_map)
-                    or transfer_pos[1] >= len(factory_occupancy_map[0])
-                ):
-                    continue
-                factory_there = factory_occupancy_map[transfer_pos[0], transfer_pos[1]]
-                if factory_there in shared_obs["teams"][agent]["factory_strains"]:
-                    action_mask[
-                        self.transfer_dim_high - self.transfer_act_dims + i
-                    ] = True
-
-            factory_there = factory_occupancy_map[pos[0], pos[1]]
-            on_top_of_factory = (
-                factory_there in shared_obs["teams"][agent]["factory_strains"]
-            )
-
-            # dig is valid only if on top of tile with rubble or resources or lichen
-            board_sum = (
-                shared_obs["board"]["ice"][pos[0], pos[1]]
-                + shared_obs["board"]["ore"][pos[0], pos[1]]
-                + shared_obs["board"]["rubble"][pos[0], pos[1]]
-                + shared_obs["board"]["lichen"][pos[0], pos[1]]
-            )
-            if board_sum > 0 and not on_top_of_factory:
-                action_mask[
-                    self.dig_dim_high - self.dig_act_dims : self.dig_dim_high
-                ] = True
-
-            # pickup is valid only if on top of factory tile
-            if on_top_of_factory:
-                action_mask[
-                    self.pickup_dim_high - self.pickup_act_dims : self.pickup_dim_high
-                ] = True
-                action_mask[
-                    self.dig_dim_high - self.dig_act_dims : self.dig_dim_high
-                ] = False
-
-            # no-op is always valid
-            action_mask[-1] = True
-            break
-        return action_mask
 
 # have to test env
